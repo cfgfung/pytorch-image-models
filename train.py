@@ -334,7 +334,7 @@ group.add_argument('--amp', action='store_true', default=False,
 group.add_argument('--amp-dtype', default='float16', type=str,
                    help='lower precision AMP dtype (default: float16)')
 group.add_argument('--amp-impl', default='native', type=str,
-                   help='AMP impl to use, "native" or "apex" (default: native)')
+                   help='AMP impl to use, "native" , "apex" or "ipex" (default: native)')
 group.add_argument('--no-ddp-bb', action='store_true', default=False,
                    help='Force broadcast buffers for native DDP to off.')
 group.add_argument('--synchronize-step', action='store_true', default=False,
@@ -402,6 +402,13 @@ def main():
             assert has_apex, 'AMP impl specified as APEX but APEX is not installed.'
             use_amp = 'apex'
             assert args.amp_dtype == 'float16'
+        elif args.amp_impl == 'ipex':
+            assert args.amp_dtype == 'bfloat16', 'Please use bfloat16 with IPEX'
+            print('Distributed training using IPEX is not supported at this moment. Going to add this new feature.')
+            print('Setting args.distributed to False')
+            args.distributed = False
+            use_amp = 'ipex'
+            device = 'cpu' # TO-DO: going to support Intel's GPU
         else:
             assert has_native_amp, 'Please update PyTorch to a version with native AMP (or use APEX).'
             use_amp = 'native'
@@ -443,6 +450,7 @@ def main():
         **factory_kwargs,
         **args.model_kwargs,
     )
+    
     if args.head_init_scale is not None:
         with torch.no_grad():
             model.get_classifier().weight.mul_(args.head_init_scale)
@@ -541,6 +549,15 @@ def main():
             loss_scaler = NativeScaler()
         if utils.is_primary(args):
             _logger.info('Using native Torch AMP. Training in mixed precision.')
+    elif use_amp == 'ipex':
+        # IPEX optimization
+        if args.amp_impl == 'ipex':
+            try:
+                import intel_extension_for_pytorch as ipex
+            except ImportError:
+                print('Cannot import IPEX. Please install "Intel Extension for PyTorch" package')
+            amp_autocast =  torch.cpu.amp.autocast
+            model, optimizer  = ipex.optimize(model, optimizer=optimizer, dtype=amp_dtype)
     else:
         if utils.is_primary(args):
             _logger.info('AMP not enabled. Training in float32.')
@@ -1022,6 +1039,9 @@ def validate(
     top5_m = utils.AverageMeter()
 
     model.eval()
+
+    if args.amp_impl == 'ipex':
+        device = torch.device('cpu')
 
     end = time.time()
     last_idx = len(loader) - 1
